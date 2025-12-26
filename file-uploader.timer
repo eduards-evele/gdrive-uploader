@@ -1,0 +1,10 @@
+[Unit]
+Description=Run file-uploader.service every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+Unit=file-uploader.service
+
+[Install]
+WantedBy=timers.target
