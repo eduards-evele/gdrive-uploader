@@ -1,6 +1,6 @@
 # Google Sheets Updater Service
 
-This service downloads a CSV file from URL and rewrites the contents of a Google Spreadsheet.  
+This service downloads a CSV file from URL and appends new rows to the Google Spreadsheet. Rows to be added are detected by unique ID
 It is designed to run as a **systemd service** triggered by a **systemd timer**.
 
 ---
@@ -30,7 +30,7 @@ It is designed to run as a **systemd service** triggered by a **systemd timer**.
 
     - Set GOOGLE_SHEET_ID (from the spreadsheet URL).
 
-    - Set ENDPOINTS (your  API URLs, separated with ; ).
+    - Set ENDPOINT (your  API URLs, separated with ; ). Ensure CSV file downloaded from API contains ID column and IDs are unique.
 
     - Set SHEETS (sheet names separated with ***;*** Sheet count should match endpoint count)
 
