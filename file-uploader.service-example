@@ -10,6 +10,7 @@ WorkingDirectory=/path/to/script
 Environment=GOOGLE_SHEET_ID=
 Environment=ENDPOINT=
 Environment=SHEETS=
+Environment=LOCAL_BACKUP_DIR=
 ExecStart=/path/to/script/venv/bin/python /path/to/script/main.py
 
 StandardOutput=journal
