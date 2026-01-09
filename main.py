@@ -53,8 +53,38 @@ def get_max_id(rows, id_col_index=0):
                 if val > max_id:
                     max_id = val
         except ValueError:
-            continue 
+            continue
     return max_id
+
+def normalize_row(row, column_count):
+    """Normalize row to have consistent length by padding with empty strings."""
+    return row + [''] * (column_count - len(row))
+
+def rows_are_different(row1, row2, column_count):
+    """Compare two rows after normalizing their length."""
+    norm_row1 = normalize_row(row1, column_count)
+    norm_row2 = normalize_row(row2, column_count)
+    return norm_row1 != norm_row2
+
+def merge_rows(existing_row, new_row, column_count):
+    """
+    Merge two rows, preserving existing data when new row has empty columns.
+    Returns a normalized row where:
+    - Non-empty values from new_row are used
+    - Empty values in new_row preserve the existing_row values
+    """
+    norm_existing = normalize_row(existing_row, column_count)
+    norm_new = normalize_row(new_row, column_count)
+
+    merged = []
+    for i in range(column_count):
+        # Use new value if it's non-empty, otherwise keep existing
+        if norm_new[i] and norm_new[i].strip():
+            merged.append(norm_new[i])
+        else:
+            merged.append(norm_existing[i])
+
+    return merged
 
 def process_and_update(service, endpoints, sheet_names):
     url_list = endpoints.split(';')
@@ -105,9 +135,10 @@ def process_and_update(service, endpoints, sheet_names):
             print(f"❌ Error reading Google Sheet: {e}")
             continue
 
-        # 5. Filter New Rows (Differential Logic)
+        # 5. Process Rows - Detect New and Changed Rows
         rows_to_append = []
-        
+        rows_to_update = []
+
         if not existing_values:
             print("Sheet is empty. Appending all data.")
             rows_to_append = csv_rows # Includes header
@@ -117,31 +148,75 @@ def process_and_update(service, endpoints, sheet_names):
                 id_col_idx = [h.lower() for h in header].index('id')
             except ValueError:
                 id_col_idx = 0
-            
-            # Get Max ID
-            existing_data_only = existing_values[1:] if len(existing_values) > 0 else []
-            current_max_id = get_max_id(existing_data_only, id_col_idx)
-            print(f"Current Max ID in Sheet: {current_max_id}")
 
-            # Filter
+            # Build a dictionary of existing rows: {id: (row_index, row_data)}
+            existing_data_only = existing_values[1:] if len(existing_values) > 0 else []
+            existing_rows_map = {}
+
+            for idx, row in enumerate(existing_data_only):
+                try:
+                    if len(row) > id_col_idx:
+                        row_id = int(row[id_col_idx])
+                        # Store 0-based data row index (header is row 0, first data row is row 1)
+                        existing_rows_map[row_id] = (idx + 2, row)  # +2 because: +1 for header, +1 for 1-based indexing
+                except (ValueError, IndexError):
+                    continue
+
+            print(f"Found {len(existing_rows_map)} existing rows with valid IDs")
+
+            # Process each CSV row
             for row in new_data_rows:
                 try:
                     if len(row) > id_col_idx:
                         row_id = int(row[id_col_idx])
-                        if row_id > current_max_id:
+
+                        if row_id in existing_rows_map:
+                            # ID exists - check if data has changed
+                            sheet_row_index, existing_row = existing_rows_map[row_id]
+
+                            if rows_are_different(existing_row, row, column_count):
+                                # Store both the row index and the existing row for merging
+                                rows_to_update.append((sheet_row_index, row, existing_row))
+                        else:
+                            # New ID - append it
                             rows_to_append.append(row)
                 except (ValueError, IndexError):
                     continue
 
-        # 6. Append Data + Timestamp Separator
+        # 6. Update Changed Rows
+        if rows_to_update:
+            print(f"Updating {len(rows_to_update)} changed rows...")
+
+            batch_data = []
+            for row_index, new_row_data, existing_row_data in rows_to_update:
+                # Merge rows: use new values where non-empty, preserve existing where CSV is empty
+                merged_row = merge_rows(existing_row_data, new_row_data, column_count)
+
+                # Create range like "Sheet1!A2:Z2" for the specific row
+                range_name = f"{target_sheet_name}!A{row_index}"
+                batch_data.append({
+                    'range': range_name,
+                    'values': [merged_row]
+                })
+
+            try:
+                service.spreadsheets().values().batchUpdate(
+                    spreadsheetId=SPREADSHEET_ID,
+                    body={'data': batch_data, 'valueInputOption': 'RAW'}
+                ).execute()
+                print(f"✅ Updated {len(rows_to_update)} rows successfully.")
+            except Exception as e:
+                print(f"❌ Error updating rows: {e}")
+
+        # 7. Append New Rows + Timestamp Separator
         if rows_to_append:
             print(f"Appending {len(rows_to_append)} new rows...")
-            
+
             # Create timestamp row: ["journal updated at ...", "", "", ...]
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             message = f"journal updated at {timestamp}"
             separator_row = [message] + [""] * (column_count - 1)
-            
+
             rows_to_append.append(separator_row)
 
             try:
@@ -156,7 +231,8 @@ def process_and_update(service, endpoints, sheet_names):
             except Exception as e:
                 print(f"❌ Error appending to Sheet: {e}")
         else:
-            print("No new data found to append.")
+            if not rows_to_update:
+                print("No new or changed data found.")
 
 def main():
     service = authenticate()
