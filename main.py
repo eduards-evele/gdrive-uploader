@@ -13,7 +13,7 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SPREADSHEET_ID = os.getenv('GOOGLE_SHEET_ID')
 SHEET_NAMES = os.getenv('SHEETS')       # Semicolon separated (e.g., "Sheet1")
 ENDPOINTS = os.getenv('ENDPOINT')       # Semicolon separated URLs
-LOCAL_BACKUP_DIR = os.getenv('LOCAL_BACKUP_DIR', '') 
+LOCAL_BACKUP_DIR = os.getenv('LOCAL_BACKUP_DIR', '')  # Semicolon separated directories (must match endpoint count)
 SERVICE_ACCOUNT_FILE = "credentials.json"
 
 def authenticate():
@@ -23,19 +23,22 @@ def authenticate():
     )
     return build("sheets", "v4", credentials=creds)
 
-def save_locally(content, index):
-    """Saves CSV content to local directory with timestamp."""
-    if not os.path.exists(LOCAL_BACKUP_DIR):
+def save_locally(content, backup_dir):
+    """Saves CSV content to specified directory with timestamp."""
+    if not backup_dir:
+        return
+
+    if not os.path.exists(backup_dir):
         try:
-            os.makedirs(LOCAL_BACKUP_DIR)
+            os.makedirs(backup_dir)
         except OSError as e:
             print(f"❌ Could not create backup directory: {e}")
             return
 
     timestamp = datetime.now().strftime("%Y_%m_%d_%H%M%S")
-    filename = f"data_backup_{index}_{timestamp}.csv"
-    filepath = os.path.join(LOCAL_BACKUP_DIR, filename)
-    
+    filename = f"data_backup_{timestamp}.csv"
+    filepath = os.path.join(backup_dir, filename)
+
     try:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
@@ -89,11 +92,20 @@ def merge_rows(existing_row, new_row, column_count):
 def process_and_update(service, endpoints, sheet_names):
     url_list = endpoints.split(';')
     sheet_list = sheet_names.split(';')
-    
-    # Safely handle mismatched list lengths
-    loop_count = min(len(url_list), len(sheet_list))
+    backup_dir_list = LOCAL_BACKUP_DIR.split(';') if LOCAL_BACKUP_DIR else []
 
-    for i in range(loop_count):
+    # Validate that all lists have matching lengths
+    if len(url_list) != len(sheet_list):
+        raise ValueError(
+            f"Endpoint count ({len(url_list)}) does not match sheet count ({len(sheet_list)})"
+        )
+
+    if backup_dir_list and len(backup_dir_list) != len(url_list):
+        raise ValueError(
+            f"Backup directory count ({len(backup_dir_list)}) does not match endpoint count ({len(url_list)})"
+        )
+
+    for i in range(len(url_list)):
         url = url_list[i]
         target_sheet_name = sheet_list[i]
         
@@ -110,7 +122,8 @@ def process_and_update(service, endpoints, sheet_names):
             continue
 
         # 2. Save to Local Disk (Restored Feature)
-        save_locally(csv_content, i+1)
+        backup_dir = backup_dir_list[i] if backup_dir_list else None
+        save_locally(csv_content, backup_dir)
 
         # 3. Parse CSV for Sheets Update
         csv_reader = csv.reader(io.StringIO(csv_content))
@@ -187,10 +200,14 @@ def process_and_update(service, endpoints, sheet_names):
         if rows_to_update:
             print(f"Updating {len(rows_to_update)} changed rows...")
 
+            update_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             batch_data = []
             for row_index, new_row_data, existing_row_data in rows_to_update:
                 # Merge rows: use new values where non-empty, preserve existing where CSV is empty
                 merged_row = merge_rows(existing_row_data, new_row_data, column_count)
+
+                # Append "updated at" timestamp to the last column (exists only in Google Sheets)
+                merged_row.append(update_timestamp)
 
                 # Create range like "Sheet1!A2:Z2" for the specific row
                 range_name = f"{target_sheet_name}!A{row_index}"
