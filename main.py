@@ -148,9 +148,10 @@ def process_and_update(service, endpoints, sheet_names):
             print(f"❌ Error reading Google Sheet: {e}")
             continue
 
-        # 5. Process Rows - Detect New and Changed Rows
+        # 5. Process Rows - Detect New, Changed, and Deleted Rows
         rows_to_append = []
         rows_to_update = []
+        rows_to_mark_deleted = []
 
         if not existing_values:
             print("Sheet is empty. Appending all data.")
@@ -177,6 +178,18 @@ def process_and_update(service, endpoints, sheet_names):
 
             print(f"Found {len(existing_rows_map)} existing rows with valid IDs")
 
+            # Build set of CSV IDs for deletion detection
+            csv_ids = set()
+            for row in new_data_rows:
+                try:
+                    if len(row) > id_col_idx:
+                        csv_ids.add(int(row[id_col_idx]))
+                except (ValueError, IndexError):
+                    continue
+
+            # Status column is at index column_count + 1 (after "updated at" column)
+            status_col_idx = column_count + 1
+
             # Process each CSV row
             for row in new_data_rows:
                 try:
@@ -187,7 +200,11 @@ def process_and_update(service, endpoints, sheet_names):
                             # ID exists - check if data has changed
                             sheet_row_index, existing_row = existing_rows_map[row_id]
 
-                            if rows_are_different(existing_row, row, column_count):
+                            # Check if row was previously marked as deleted
+                            was_deleted = (len(existing_row) > status_col_idx and
+                                          existing_row[status_col_idx].lower() == 'deleted')
+
+                            if rows_are_different(existing_row, row, column_count) or was_deleted:
                                 # Store both the row index and the existing row for merging
                                 rows_to_update.append((sheet_row_index, row, existing_row))
                         else:
@@ -195,6 +212,15 @@ def process_and_update(service, endpoints, sheet_names):
                             rows_to_append.append(row)
                 except (ValueError, IndexError):
                     continue
+
+            # Detect rows in Google Sheets that are missing from CSV (deleted)
+            for row_id, (sheet_row_index, existing_row) in existing_rows_map.items():
+                if row_id not in csv_ids:
+                    # Skip if already marked as deleted
+                    already_deleted = (len(existing_row) > status_col_idx and
+                                      existing_row[status_col_idx].lower() == 'deleted')
+                    if not already_deleted:
+                        rows_to_mark_deleted.append((sheet_row_index, existing_row))
 
         # 6. Update Changed Rows
         if rows_to_update:
@@ -206,8 +232,9 @@ def process_and_update(service, endpoints, sheet_names):
                 # Merge rows: use new values where non-empty, preserve existing where CSV is empty
                 merged_row = merge_rows(existing_row_data, new_row_data, column_count)
 
-                # Append "updated at" timestamp to the last column (exists only in Google Sheets)
+                # Append "updated at" timestamp and clear status (row is active)
                 merged_row.append(update_timestamp)
+                merged_row.append('')  # Status column - empty means active
 
                 # Create range like "Sheet1!A2:Z2" for the specific row
                 range_name = f"{target_sheet_name}!A{row_index}"
@@ -225,7 +252,36 @@ def process_and_update(service, endpoints, sheet_names):
             except Exception as e:
                 print(f"❌ Error updating rows: {e}")
 
-        # 7. Append New Rows + Timestamp Separator
+        # 7. Mark Deleted Rows (in Google Sheets but not in CSV)
+        if rows_to_mark_deleted:
+            print(f"Marking {len(rows_to_mark_deleted)} rows as deleted...")
+
+            update_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            batch_data = []
+            for row_index, existing_row_data in rows_to_mark_deleted:
+                # Normalize the row to have consistent column count
+                normalized_row = normalize_row(existing_row_data, column_count)
+
+                # Append "updated at" timestamp and "deleted" status
+                normalized_row.append(update_timestamp)
+                normalized_row.append('deleted')
+
+                range_name = f"{target_sheet_name}!A{row_index}"
+                batch_data.append({
+                    'range': range_name,
+                    'values': [normalized_row]
+                })
+
+            try:
+                service.spreadsheets().values().batchUpdate(
+                    spreadsheetId=SPREADSHEET_ID,
+                    body={'data': batch_data, 'valueInputOption': 'RAW'}
+                ).execute()
+                print(f"✅ Marked {len(rows_to_mark_deleted)} rows as deleted.")
+            except Exception as e:
+                print(f"❌ Error marking deleted rows: {e}")
+
+        # 8. Append New Rows + Timestamp Separator
         if rows_to_append:
             print(f"Appending {len(rows_to_append)} new rows...")
 
@@ -248,8 +304,8 @@ def process_and_update(service, endpoints, sheet_names):
             except Exception as e:
                 print(f"❌ Error appending to Sheet: {e}")
         else:
-            if not rows_to_update:
-                print("No new or changed data found.")
+            if not rows_to_update and not rows_to_mark_deleted:
+                print("No new, changed, or deleted data found.")
 
 def main():
     service = authenticate()
